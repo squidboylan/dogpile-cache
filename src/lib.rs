@@ -6,10 +6,9 @@ use tokio::select;
 use tokio::sync::{Notify, RwLock, RwLockReadGuard};
 use tokio::time;
 
-struct DogpileCache<T, F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static> {
+struct DogpileCache<T> {
     cache_data: Arc<RwLock<CacheData<T>>>,
     refreshed: Arc<Notify>,
-    refresh_fn: fn() -> F,
 }
 
 pub struct CacheData<T> {
@@ -18,25 +17,27 @@ pub struct CacheData<T> {
     refresh_time: Instant,
 }
 
-impl<T, F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static> Clone
-    for DogpileCache<T, F>
-{
+struct CacheRefresher<T, F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static> {
+    cache: DogpileCache<T>,
+    refresh_fn: fn() -> F,
+    backoff: Duration,
+}
+
+impl<T> Clone for DogpileCache<T> {
     fn clone(&self) -> Self {
         Self {
             cache_data: self.cache_data.clone(),
             refreshed: self.refreshed.clone(),
-            refresh_fn: self.refresh_fn.clone(),
         }
     }
 }
 
 #[allow(dead_code)]
-impl<
-        T: Send + Sync + 'static,
-        F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static,
-    > DogpileCache<T, F>
-{
-    pub async fn create(init: T, refresh_fn: fn() -> F) -> Self {
+impl<T: Send + Sync + 'static> DogpileCache<T> {
+    pub async fn create<F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static>(
+        init: T,
+        refresh_fn: fn() -> F,
+    ) -> Self {
         let mut expire_time = Instant::now();
         let mut refresh_time = Instant::now();
         let cache_data = Arc::new(RwLock::new(CacheData {
@@ -48,22 +49,22 @@ impl<
         let cache = Self {
             cache_data,
             refreshed,
-            refresh_fn,
         };
         let c = cache.clone();
+        let mut refresher = CacheRefresher::create(c, refresh_fn);
         tokio::spawn(async move {
             loop {
                 select! {
                     _ = time::sleep_until(time::Instant::from_std(refresh_time)) => {
                         debug!("Starting refresh");
-                        let times = c.refresh().await;
+                        let times = refresher.refresh().await;
                         debug!("Refresh finished");
                         expire_time = times.0;
                         refresh_time = times.1;
                     }
                     _ = time::sleep_until(time::Instant::from_std(expire_time)) => {
                         debug!("Starting refresh");
-                        let times = c.refresh().await;
+                        let times = refresher.refresh().await;
                         debug!("Refresh finished");
                         expire_time = times.0;
                         refresh_time = times.1;
@@ -84,23 +85,35 @@ impl<
         }
         self.cache_data.read().await
     }
-    async fn refresh(&self) -> (Instant, Instant) {
+}
+
+impl<T, F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static>
+    CacheRefresher<T, F>
+{
+    fn create(cache: DogpileCache<T>, refresh_fn: fn() -> F) -> Self {
+        Self {
+            cache,
+            refresh_fn,
+            backoff: Duration::from_millis(10),
+        }
+    }
+    async fn refresh(&mut self) -> (Instant, Instant) {
         // We need to hold the refresh lock so only one task will attempt to generate the new value
         if let Ok((new_value, new_expire_time, new_refresh_time)) = (self.refresh_fn)().await {
             debug!("Acquiring writer lock");
-            let mut cd_writer = self.cache_data.write().await;
+            self.backoff = Duration::from_millis(10);
+            let mut cd_writer = self.cache.cache_data.write().await;
             cd_writer.value = new_value;
             cd_writer.expire_time = new_expire_time;
             cd_writer.refresh_time = new_refresh_time;
             debug!("notifying waiters");
-            self.refreshed.notify_waiters();
+            self.cache.refreshed.notify_waiters();
             return (new_expire_time, new_refresh_time);
         }
         warn!("Refresh fn failed");
-        (
-            Instant::now() + Duration::from_millis(500),
-            Instant::now() + Duration::from_millis(500),
-        )
+        let ret = (Instant::now() + self.backoff, Instant::now() + self.backoff);
+        self.backoff *= 2;
+        ret
     }
 }
 
@@ -109,7 +122,7 @@ mod test {
     use super::*;
     use tokio::time::sleep;
     #[tokio::test]
-    async fn test1() {
+    async fn test_cache_basics() {
         env_logger::init();
         let sleep_length = Duration::from_millis(21);
         async fn num() -> Result<(i32, Instant, Instant), ()> {
@@ -120,7 +133,7 @@ mod test {
                 Instant::now() + valid_length,
             ))
         }
-        let c = DogpileCache::<i32, _>::create(0, num).await;
+        let c = DogpileCache::<i32>::create(0, num).await;
         println!("Created dogpile cache");
         assert_eq!(c.read().await.value, 1);
         c.cache_data.write().await.value = 2;
