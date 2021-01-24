@@ -1,3 +1,28 @@
+//! dogpile-cache provides a cache which holds values that expire on a timer
+//! and will make an effort to premtively refresh the value before it is
+//! expired and do so in a way that requires little waiting.
+//!
+//! Example
+//! ```rust
+//! use std::time::{Duration, Instant};
+//! use dogpile_cache_rs::DogpileCache;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let sleep_length = Duration::from_millis(21);
+//!     async fn num(v: i32) -> Result<(i32, Instant, Instant), ()> {
+//!         let valid_length = Duration::from_millis(20);
+//!         Ok((
+//!             v,
+//!             Instant::now() + valid_length,
+//!             Instant::now() + valid_length,
+//!         ))
+//!     }
+//!     let c = DogpileCache::<i32>::create(0, num, 1).await;
+//!     assert_eq!(c.read().await.value, 1);
+//!  }
+//! ```
+
 use log::{debug, warn};
 use std::future::Future;
 use std::sync::Arc;
@@ -7,7 +32,7 @@ use tokio::sync::{Notify, RwLock, RwLockReadGuard};
 use tokio::time;
 
 pub struct DogpileCache<T> {
-    pub cache_data: Arc<RwLock<CacheData<T>>>,
+    cache_data: Arc<RwLock<CacheData<T>>>,
     refreshed: Arc<Notify>,
 }
 
@@ -35,6 +60,8 @@ impl<T> Clone for DogpileCache<T> {
 
 #[allow(dead_code)]
 impl<T: Send + Sync + 'static> DogpileCache<T> {
+    /// Create the dogpile cache, this starts a task to eagerly refresh the value at intervals
+    /// specified by the refresh_fn return data.
     pub async fn create<
         A: Clone + Send + Sync + 'static,
         F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static,
@@ -79,6 +106,12 @@ impl<T: Send + Sync + 'static> DogpileCache<T> {
         });
         cache
     }
+
+    /// Checks the cache value to see if it's expired, if not it returns a read lock to the data,
+    /// if it is expired the task waits until the value is refreshed. Note that this returns a
+    /// `RwLockReadGuard`, refreshing cannot happen until these are freed, therefore if you must
+    /// hold onto the data for a significant amount of time you should clone the data and drop the
+    /// lock.
     pub async fn read<'a>(&'a self) -> RwLockReadGuard<'a, CacheData<T>> {
         // Register a notification, this has to be done before grabbing the read lock
         let n = self.refreshed.notified();
