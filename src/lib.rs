@@ -183,29 +183,37 @@ impl<
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::Mutex;
     use tokio::time::sleep;
     #[tokio::test]
     async fn test_cache_basics() {
         env_logger::init();
         let sleep_length = Duration::from_millis(11);
-        async fn num(v: i32) -> Result<CacheData<i32>, ()> {
+        async fn num(v: Arc<Mutex<i32>>) -> Result<CacheData<i32>, ()> {
             let valid_length = Duration::from_millis(20);
+            let mut l = v.lock().unwrap();
+            *l += 1;
             Ok(CacheData::new(
-                v,
+                *l,
                 Instant::now() + valid_length,
                 Instant::now() + valid_length / 2,
             ))
         }
-        let c1 = DogpileCache::<i32>::create(num, 1).await;
-        let c2 = DogpileCache::<i32>::create(num, 1).await;
+        let c1 = DogpileCache::<i32>::create(num, Arc::new(Mutex::new(0))).await;
+        let c2 = c1.clone();
         assert_eq!(c1.read().await.value, 1);
-        c1.cache_data.write().await.value = 2;
-        assert_eq!(c1.read().await.value, 2);
+        c1.cache_data.write().await.value = 10;
+        assert_eq!(c1.read().await.value, 10);
         tokio::spawn(async move {
             sleep(sleep_length).await;
-            assert_eq!(c2.read().await.value, 1);
+            assert_eq!(c2.read().await.value, 2);
+            sleep(sleep_length).await;
+            assert_eq!(c2.read().await.value, 3);
+            sleep(sleep_length).await;
+            sleep(sleep_length).await;
+            assert_eq!(c2.read().await.value, 5);
         });
         sleep(sleep_length).await;
-        assert_eq!(c1.read().await.value, 1);
+        assert_eq!(c1.read().await.value, 2);
     }
 }
