@@ -30,6 +30,9 @@ use tokio::select;
 use tokio::sync::{Notify, RwLock, RwLockReadGuard};
 use tokio::time;
 
+/// A simple cache that holds some data that expires and has a task to attempt to refresh
+/// the value before it expires. This struct uses `Arc` internally to store its data so clones of
+/// a cache will point to the same data.
 pub struct DogpileCache<T> {
     cache_data: Arc<RwLock<CacheData<T>>>,
     refreshed: Arc<Notify>,
@@ -193,13 +196,16 @@ mod test {
                 Instant::now() + valid_length / 2,
             ))
         }
-        let c = DogpileCache::<i32>::create(num, 1).await;
-        println!("Created dogpile cache");
-        assert_eq!(c.read().await.value, 1);
-        c.cache_data.write().await.value = 2;
-        assert_eq!(c.read().await.value, 2);
-        assert_eq!(c.read().await.value, 2);
+        let c1 = DogpileCache::<i32>::create(num, 1).await;
+        let c2 = DogpileCache::<i32>::create(num, 1).await;
+        assert_eq!(c1.read().await.value, 1);
+        c1.cache_data.write().await.value = 2;
+        assert_eq!(c1.read().await.value, 2);
+        tokio::spawn(async move {
+            sleep(sleep_length).await;
+            assert_eq!(c2.read().await.value, 1);
+        });
         sleep(sleep_length).await;
-        assert_eq!(c.read().await.value, 1);
+        assert_eq!(c1.read().await.value, 1);
     }
 }
