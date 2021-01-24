@@ -9,18 +9,17 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let sleep_length = Duration::from_millis(21);
 //!     async fn num(v: i32) -> Result<CacheData<i32>, ()> {
 //!         let valid_length = Duration::from_millis(20);
-//!         Ok(CacheData {
-//!             value: v,
-//!             expire_time: Instant::now() + valid_length,
-//!             refresh_time: Instant::now() + valid_length,
-//!         })
+//!         Ok(CacheData::new(
+//!             v,
+//!             Instant::now() + valid_length,
+//!             Instant::now() + valid_length/2,
+//!         ))
 //!     }
 //!     let c = DogpileCache::<i32>::create(0, num, 1).await;
 //!     assert_eq!(c.read().await.value, 1);
-//!  }
+//! }
 //! ```
 
 use log::{debug, warn};
@@ -36,6 +35,7 @@ pub struct DogpileCache<T> {
     refreshed: Arc<Notify>,
 }
 
+/// The value the DogpileCache will store and how often it expires and should be refreshed.
 pub struct CacheData<T> {
     pub value: T,
     pub expire_time: Instant,
@@ -61,7 +61,9 @@ impl<T> Clone for DogpileCache<T> {
 #[allow(dead_code)]
 impl<T: Send + Sync + 'static> DogpileCache<T> {
     /// Create the dogpile cache, this starts a task to eagerly refresh the value at intervals
-    /// specified by the refresh_fn return data.
+    /// specified by the refresh_fn return data. `refresh_arg` will be cloned and passed to
+    /// `refresh_fn`, if your refresh_arg is expensive to clone you should use an `Arc<V>` and if you
+    /// need mutability you should use `Arc<RwLock<V>>` or `Arc<Mutex<V>>`.
     pub async fn create<
         A: Clone + Send + Sync + 'static,
         F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
@@ -125,6 +127,16 @@ impl<T: Send + Sync + 'static> DogpileCache<T> {
     }
 }
 
+impl<T> CacheData<T> {
+    pub fn new(value: T, expire_time: Instant, refresh_time: Instant) -> Self {
+        Self {
+            value,
+            expire_time,
+            refresh_time,
+        }
+    }
+}
+
 impl<
         T,
         A: Clone + Send + Sync + 'static,
@@ -171,14 +183,14 @@ mod test {
     #[tokio::test]
     async fn test_cache_basics() {
         env_logger::init();
-        let sleep_length = Duration::from_millis(21);
+        let sleep_length = Duration::from_millis(11);
         async fn num(v: i32) -> Result<CacheData<i32>, ()> {
             let valid_length = Duration::from_millis(20);
-            Ok(CacheData {
-                value: v,
-                expire_time: Instant::now() + valid_length,
-                refresh_time: Instant::now() + valid_length,
-            })
+            Ok(CacheData::new(
+                v,
+                Instant::now() + valid_length,
+                Instant::now() + valid_length / 2,
+            ))
         }
         let c = DogpileCache::<i32>::create(0, num, 1).await;
         println!("Created dogpile cache");
