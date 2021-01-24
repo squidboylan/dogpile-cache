@@ -114,7 +114,7 @@ impl<T: Send + Sync + 'static> DogpileCache<T> {
     /// `RwLockReadGuard`, refreshing cannot happen until these are freed, therefore if you must
     /// hold onto the data for a significant amount of time you should clone the data and drop the
     /// lock.
-    pub async fn read<'a>(&'a self) -> RwLockReadGuard<'a, CacheData<T>> {
+    pub async fn read(&self) -> RwLockReadGuard<'_, CacheData<T>> {
         // Register a notification, this has to be done before grabbing the read lock
         let n = self.refreshed.notified();
         if self.cache_data.read().await.expire_time <= Instant::now() {
