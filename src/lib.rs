@@ -17,9 +17,10 @@ pub struct CacheData<T> {
     refresh_time: Instant,
 }
 
-struct CacheRefresher<T, F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static> {
+struct CacheRefresher<T, A, F> {
     cache: DogpileCache<T>,
-    refresh_fn: fn() -> F,
+    refresh_fn: fn(A) -> F,
+    refresh_arg: A,
     backoff: Duration,
 }
 
@@ -34,9 +35,13 @@ impl<T> Clone for DogpileCache<T> {
 
 #[allow(dead_code)]
 impl<T: Send + Sync + 'static> DogpileCache<T> {
-    pub async fn create<F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static>(
+    pub async fn create<
+        A: Clone + Send + Sync + 'static,
+        F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static,
+    >(
         init: T,
-        refresh_fn: fn() -> F,
+        refresh_fn: fn(A) -> F,
+        refresh_arg: A,
     ) -> Self {
         let mut expire_time = Instant::now();
         let mut refresh_time = Instant::now();
@@ -51,8 +56,8 @@ impl<T: Send + Sync + 'static> DogpileCache<T> {
             refreshed,
         };
         let c = cache.clone();
-        let mut refresher = CacheRefresher::create(c, refresh_fn);
         tokio::spawn(async move {
+            let mut refresher = CacheRefresher::create(c, refresh_fn, refresh_arg);
             loop {
                 select! {
                     _ = time::sleep_until(time::Instant::from_std(refresh_time)) => {
@@ -87,19 +92,25 @@ impl<T: Send + Sync + 'static> DogpileCache<T> {
     }
 }
 
-impl<T, F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static>
-    CacheRefresher<T, F>
+impl<
+        T,
+        A: Clone + Send + Sync + 'static,
+        F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static,
+    > CacheRefresher<T, A, F>
 {
-    fn create(cache: DogpileCache<T>, refresh_fn: fn() -> F) -> Self {
+    fn create(cache: DogpileCache<T>, refresh_fn: fn(A) -> F, refresh_arg: A) -> Self {
         Self {
             cache,
             refresh_fn,
+            refresh_arg,
             backoff: Duration::from_millis(10),
         }
     }
     async fn refresh(&mut self) -> (Instant, Instant) {
         // We need to hold the refresh lock so only one task will attempt to generate the new value
-        if let Ok((new_value, new_expire_time, new_refresh_time)) = (self.refresh_fn)().await {
+        if let Ok((new_value, new_expire_time, new_refresh_time)) =
+            (self.refresh_fn)(self.refresh_arg.clone()).await
+        {
             debug!("Acquiring writer lock");
             self.backoff = Duration::from_millis(10);
             let mut cd_writer = self.cache.cache_data.write().await;
@@ -125,15 +136,15 @@ mod test {
     async fn test_cache_basics() {
         env_logger::init();
         let sleep_length = Duration::from_millis(21);
-        async fn num() -> Result<(i32, Instant, Instant), ()> {
+        async fn num(v: i32) -> Result<(i32, Instant, Instant), ()> {
             let valid_length = Duration::from_millis(20);
             Ok((
-                1,
+                v,
                 Instant::now() + valid_length,
                 Instant::now() + valid_length,
             ))
         }
-        let c = DogpileCache::<i32>::create(0, num).await;
+        let c = DogpileCache::<i32>::create(0, num, 1).await;
         println!("Created dogpile cache");
         assert_eq!(c.read().await.value, 1);
         c.cache_data.write().await.value = 2;
