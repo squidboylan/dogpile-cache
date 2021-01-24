@@ -6,15 +6,15 @@ use tokio::select;
 use tokio::sync::{Notify, RwLock, RwLockReadGuard};
 use tokio::time;
 
-struct DogpileCache<T> {
-    cache_data: Arc<RwLock<CacheData<T>>>,
+pub struct DogpileCache<T> {
+    pub cache_data: Arc<RwLock<CacheData<T>>>,
     refreshed: Arc<Notify>,
 }
 
 pub struct CacheData<T> {
     pub value: T,
-    expire_time: Instant,
-    refresh_time: Instant,
+    pub expire_time: Instant,
+    pub refresh_time: Instant,
 }
 
 struct CacheRefresher<T, A, F> {
