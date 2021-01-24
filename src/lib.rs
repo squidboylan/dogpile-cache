@@ -17,7 +17,7 @@
 //!             Instant::now() + valid_length/2,
 //!         ))
 //!     }
-//!     let c = DogpileCache::<i32>::create(0, num, 1).await;
+//!     let c = DogpileCache::<i32>::create(num, 1).await;
 //!     assert_eq!(c.read().await.value, 1);
 //! }
 //! ```
@@ -59,23 +59,24 @@ impl<T> Clone for DogpileCache<T> {
 }
 
 #[allow(dead_code)]
-impl<T: Send + Sync + 'static> DogpileCache<T> {
+impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
     /// Create the dogpile cache, this starts a task to eagerly refresh the value at intervals
-    /// specified by the refresh_fn return data. `refresh_arg` will be cloned and passed to
+    /// specified by the refresh_fn return data. We require T to impl `Default` so we can generate
+    /// an initial value before the cache is primed, if your type does not `impl Default` you
+    /// should wrap it in an `Option`. `refresh_arg` will be cloned and passed to
     /// `refresh_fn`, if your refresh_arg is expensive to clone you should use an `Arc<V>` and if you
     /// need mutability you should use `Arc<RwLock<V>>` or `Arc<Mutex<V>>`.
     pub async fn create<
         A: Clone + Send + Sync + 'static,
         F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
     >(
-        init: T,
         refresh_fn: fn(A) -> F,
         refresh_arg: A,
     ) -> Self {
         let mut expire_time = Instant::now();
         let mut refresh_time = Instant::now();
         let cache_data = Arc::new(RwLock::new(CacheData {
-            value: init,
+            value: T::default(),
             expire_time,
             refresh_time,
         }));
@@ -192,7 +193,7 @@ mod test {
                 Instant::now() + valid_length / 2,
             ))
         }
-        let c = DogpileCache::<i32>::create(0, num, 1).await;
+        let c = DogpileCache::<i32>::create(num, 1).await;
         println!("Created dogpile cache");
         assert_eq!(c.read().await.value, 1);
         c.cache_data.write().await.value = 2;
