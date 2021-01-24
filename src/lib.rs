@@ -5,18 +5,18 @@
 //! Example
 //! ```rust
 //! use std::time::{Duration, Instant};
-//! use dogpile_cache_rs::DogpileCache;
+//! use dogpile_cache_rs::{DogpileCache, CacheData};
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     let sleep_length = Duration::from_millis(21);
-//!     async fn num(v: i32) -> Result<(i32, Instant, Instant), ()> {
+//!     async fn num(v: i32) -> Result<CacheData<i32>, ()> {
 //!         let valid_length = Duration::from_millis(20);
-//!         Ok((
-//!             v,
-//!             Instant::now() + valid_length,
-//!             Instant::now() + valid_length,
-//!         ))
+//!         Ok(CacheData {
+//!             value: v,
+//!             expire_time: Instant::now() + valid_length,
+//!             refresh_time: Instant::now() + valid_length,
+//!         })
 //!     }
 //!     let c = DogpileCache::<i32>::create(0, num, 1).await;
 //!     assert_eq!(c.read().await.value, 1);
@@ -64,7 +64,7 @@ impl<T: Send + Sync + 'static> DogpileCache<T> {
     /// specified by the refresh_fn return data.
     pub async fn create<
         A: Clone + Send + Sync + 'static,
-        F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static,
+        F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
     >(
         init: T,
         refresh_fn: fn(A) -> F,
@@ -128,7 +128,7 @@ impl<T: Send + Sync + 'static> DogpileCache<T> {
 impl<
         T,
         A: Clone + Send + Sync + 'static,
-        F: Future<Output = Result<(T, Instant, Instant), ()>> + Send + 'static,
+        F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
     > CacheRefresher<T, A, F>
 {
     fn create(cache: DogpileCache<T>, refresh_fn: fn(A) -> F, refresh_arg: A) -> Self {
@@ -141,8 +141,11 @@ impl<
     }
     async fn refresh(&mut self) -> (Instant, Instant) {
         // We need to hold the refresh lock so only one task will attempt to generate the new value
-        if let Ok((new_value, new_expire_time, new_refresh_time)) =
-            (self.refresh_fn)(self.refresh_arg.clone()).await
+        if let Ok(CacheData {
+            value: new_value,
+            expire_time: new_expire_time,
+            refresh_time: new_refresh_time,
+        }) = (self.refresh_fn)(self.refresh_arg.clone()).await
         {
             debug!("Acquiring writer lock");
             self.backoff = Duration::from_millis(10);
@@ -169,13 +172,13 @@ mod test {
     async fn test_cache_basics() {
         env_logger::init();
         let sleep_length = Duration::from_millis(21);
-        async fn num(v: i32) -> Result<(i32, Instant, Instant), ()> {
+        async fn num(v: i32) -> Result<CacheData<i32>, ()> {
             let valid_length = Duration::from_millis(20);
-            Ok((
-                v,
-                Instant::now() + valid_length,
-                Instant::now() + valid_length,
-            ))
+            Ok(CacheData {
+                value: v,
+                expire_time: Instant::now() + valid_length,
+                refresh_time: Instant::now() + valid_length,
+            })
         }
         let c = DogpileCache::<i32>::create(0, num, 1).await;
         println!("Created dogpile cache");
