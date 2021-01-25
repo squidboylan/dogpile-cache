@@ -23,7 +23,6 @@
 //! ```
 
 use backoff::backoff::Backoff;
-use log::{debug, warn};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -118,9 +117,7 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
         let n = self.notifiers.refreshed.notified();
         if self.cache_data.read().await.expire_time <= Instant::now() {
             self.refresh();
-            debug!("Value is expired, waiting for refresh");
             n.await;
-            debug!("reader woken");
         }
         self.cache_data.read().await
     }
@@ -172,22 +169,16 @@ impl<
     async fn run(mut self) -> ! {
         select! {
             _ = self.cache.notifiers.expired.notified() => {
-                debug!("Starting refresh");
                 self.refresh().await;
-                debug!("Refresh finished");
             }
         }
         loop {
             select! {
                 _ = self.cache.notifiers.expired.notified() => {
-                    debug!("Starting refresh");
                     self.refresh().await;
-                    debug!("Refresh finished");
                 }
                 _ = time::sleep_until(time::Instant::from_std(self.next_wake)) => {
-                    debug!("Starting refresh");
                     self.refresh().await;
-                    debug!("Refresh finished");
                 }
             }
         }
@@ -200,17 +191,14 @@ impl<
             refresh_time: new_refresh_time,
         }) = (self.refresh_fn)(self.refresh_arg.clone()).await
         {
-            debug!("Acquiring writer lock");
             self.backoff.reset();
             let mut cd_writer = self.cache.cache_data.write().await;
             cd_writer.value = new_value;
             cd_writer.expire_time = new_expire_time;
             cd_writer.refresh_time = new_refresh_time;
             self.next_wake = std::cmp::min(new_expire_time, new_refresh_time);
-            debug!("notifying waiters");
             self.cache.notifiers.refreshed.notify_waiters();
         } else {
-            warn!("Refresh fn failed");
             self.next_wake = Instant::now() + self.backoff.next_backoff().unwrap();
         }
     }
@@ -223,7 +211,6 @@ mod test {
     use tokio::time::sleep;
     #[tokio::test]
     async fn test_cache_basics() {
-        env_logger::init();
         let sleep_length = Duration::from_millis(10);
         async fn num(v: Arc<Mutex<i32>>) -> Result<CacheData<i32>, ()> {
             let valid_length = Duration::from_millis(20);
