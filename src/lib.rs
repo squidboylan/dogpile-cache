@@ -35,7 +35,13 @@ use tokio::time;
 /// a cache will point to the same data.
 pub struct DogpileCache<T> {
     cache_data: Arc<RwLock<CacheData<T>>>,
-    refreshed: Arc<Notify>,
+    notifiers: Arc<Notifiers>,
+}
+
+struct Notifiers {
+    refreshed: Notify,
+    expired: Notify,
+    once: std::sync::Once,
 }
 
 /// The value the DogpileCache will store and how often it expires and should be refreshed.
@@ -56,7 +62,7 @@ impl<T> Clone for DogpileCache<T> {
     fn clone(&self) -> Self {
         Self {
             cache_data: self.cache_data.clone(),
-            refreshed: self.refreshed.clone(),
+            notifiers: self.notifiers.clone(),
         }
     }
 }
@@ -83,16 +89,36 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
             expire_time,
             refresh_time,
         }));
-        let refreshed = Arc::new(Notify::new());
+        let notifiers = Arc::new(Notifiers {
+            expired: Notify::default(),
+            refreshed: Notify::default(),
+            once: std::sync::Once::new(),
+        });
         let cache = Self {
             cache_data,
-            refreshed,
+            notifiers,
         };
         let c = cache.clone();
         tokio::spawn(async move {
             let mut refresher = CacheRefresher::create(c, refresh_fn, refresh_arg);
+            select! {
+                _ = refresher.cache.notifiers.expired.notified() => {
+                    debug!("Starting refresh");
+                    let times = refresher.refresh().await;
+                    debug!("Refresh finished");
+                    expire_time = times.0;
+                    refresh_time = times.1;
+                }
+            }
             loop {
                 select! {
+                    _ = refresher.cache.notifiers.expired.notified() => {
+                        debug!("Starting refresh");
+                        let times = refresher.refresh().await;
+                        debug!("Refresh finished");
+                        expire_time = times.0;
+                        refresh_time = times.1;
+                    }
                     _ = time::sleep_until(time::Instant::from_std(refresh_time)) => {
                         debug!("Starting refresh");
                         let times = refresher.refresh().await;
@@ -120,14 +146,24 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
     /// lock.
     pub async fn read(&self) -> RwLockReadGuard<'_, CacheData<T>> {
         // Register a notification, this has to be done before grabbing the read lock
-        let n = self.refreshed.notified();
+        let n = self.notifiers.refreshed.notified();
         if self.cache_data.read().await.expire_time <= Instant::now() {
-            // Wait to be notified of the updated cache value
+            self.refresh();
             debug!("Value is expired, waiting for refresh");
             n.await;
             debug!("reader woken");
         }
         self.cache_data.read().await
+    }
+
+    /// Trigger a cach refresh and wait to be notified of the updated cache value
+    fn refresh(&self) {
+        // The first time we do this we need to call notify() as the refresher task may not be
+        // listening already
+        self.notifiers
+            .once
+            .call_once(|| self.notifiers.expired.notify_one());
+        self.notifiers.expired.notify_waiters();
     }
 }
 
@@ -170,7 +206,7 @@ impl<
             cd_writer.expire_time = new_expire_time;
             cd_writer.refresh_time = new_refresh_time;
             debug!("notifying waiters");
-            self.cache.refreshed.notify_waiters();
+            self.cache.notifiers.refreshed.notify_waiters();
             return (new_expire_time, new_refresh_time);
         }
         warn!("Refresh fn failed");
