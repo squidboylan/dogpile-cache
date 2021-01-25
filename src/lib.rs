@@ -75,6 +75,7 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
     /// should wrap it in an `Option`. `refresh_arg` will be cloned and passed to
     /// `refresh_fn`, if your refresh_arg is expensive to clone you should use an `Arc<V>` and if you
     /// need mutability you should use `Arc<RwLock<V>>` or `Arc<Mutex<V>>`.
+    #[allow(unused_assignments)]
     pub async fn create<
         A: Clone + Send + Sync + 'static,
         F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
@@ -106,6 +107,8 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
                     debug!("Starting refresh");
                     let times = refresher.refresh().await;
                     debug!("Refresh finished");
+                    // The compiler thinks these are unused, likely do to some bug caused by the
+                    // select! macro so we allow unused_assignments in this function
                     expire_time = times.0;
                     refresh_time = times.1;
                 }
@@ -224,7 +227,7 @@ mod test {
     #[tokio::test]
     async fn test_cache_basics() {
         env_logger::init();
-        let sleep_length = Duration::from_millis(11);
+        let sleep_length = Duration::from_millis(10);
         async fn num(v: Arc<Mutex<i32>>) -> Result<CacheData<i32>, ()> {
             let valid_length = Duration::from_millis(20);
             let mut l = v.lock().unwrap();
@@ -237,8 +240,11 @@ mod test {
         }
         let c1 = DogpileCache::<i32>::create(num, Arc::new(Mutex::new(0))).await;
         let c2 = c1.clone();
+        sleep(Duration::from_millis(6)).await;
         assert_eq!(c1.read().await.value, 1);
         c1.cache_data.write().await.value = 10;
+        assert_eq!(c1.read().await.value, 10);
+        sleep(Duration::from_millis(5)).await;
         assert_eq!(c1.read().await.value, 10);
         tokio::spawn(async move {
             sleep(sleep_length).await;
