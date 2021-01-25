@@ -22,6 +22,7 @@
 //! }
 //! ```
 
+use backoff::backoff::Backoff;
 use log::{debug, warn};
 use std::future::Future;
 use std::sync::Arc;
@@ -55,7 +56,7 @@ struct CacheRefresher<T, A, F> {
     cache: DogpileCache<T>,
     refresh_fn: fn(A) -> F,
     refresh_arg: A,
-    backoff: Duration,
+    backoff: backoff::ExponentialBackoff,
 }
 
 impl<T> Clone for DogpileCache<T> {
@@ -75,7 +76,6 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
     /// should wrap it in an `Option`. `refresh_arg` will be cloned and passed to
     /// `refresh_fn`, if your refresh_arg is expensive to clone you should use an `Arc<V>` and if you
     /// need mutability you should use `Arc<RwLock<V>>` or `Arc<Mutex<V>>`.
-    #[allow(unused_assignments)]
     pub async fn create<
         A: Clone + Send + Sync + 'static,
         F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
@@ -83,8 +83,8 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
         refresh_fn: fn(A) -> F,
         refresh_arg: A,
     ) -> Self {
-        let mut expire_time = Instant::now();
-        let mut refresh_time = Instant::now();
+        let expire_time = Instant::now();
+        let refresh_time = Instant::now();
         let cache_data = Arc::new(RwLock::new(CacheData {
             value: T::default(),
             expire_time,
@@ -101,43 +101,8 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
         };
         let c = cache.clone();
         tokio::spawn(async move {
-            let mut refresher = CacheRefresher::create(c, refresh_fn, refresh_arg);
-            select! {
-                _ = refresher.cache.notifiers.expired.notified() => {
-                    debug!("Starting refresh");
-                    let times = refresher.refresh().await;
-                    debug!("Refresh finished");
-                    // The compiler thinks these are unused, likely do to some bug caused by the
-                    // select! macro so we allow unused_assignments in this function
-                    expire_time = times.0;
-                    refresh_time = times.1;
-                }
-            }
-            loop {
-                select! {
-                    _ = refresher.cache.notifiers.expired.notified() => {
-                        debug!("Starting refresh");
-                        let times = refresher.refresh().await;
-                        debug!("Refresh finished");
-                        expire_time = times.0;
-                        refresh_time = times.1;
-                    }
-                    _ = time::sleep_until(time::Instant::from_std(refresh_time)) => {
-                        debug!("Starting refresh");
-                        let times = refresher.refresh().await;
-                        debug!("Refresh finished");
-                        expire_time = times.0;
-                        refresh_time = times.1;
-                    }
-                    _ = time::sleep_until(time::Instant::from_std(expire_time)) => {
-                        debug!("Starting refresh");
-                        let times = refresher.refresh().await;
-                        debug!("Refresh finished");
-                        expire_time = times.0;
-                        refresh_time = times.1;
-                    }
-                }
-            }
+            let refresher = CacheRefresher::create(c, refresh_fn, refresh_arg);
+            refresher.run().await;
         });
         cache
     }
@@ -187,11 +152,57 @@ impl<
     > CacheRefresher<T, A, F>
 {
     fn create(cache: DogpileCache<T>, refresh_fn: fn(A) -> F, refresh_arg: A) -> Self {
+        let backoff = backoff::ExponentialBackoff {
+            max_elapsed_time: None,
+            current_interval: Duration::from_millis(50),
+            initial_interval: Duration::from_millis(50),
+            randomization_factor: 0.0,
+            ..backoff::ExponentialBackoff::default()
+        };
         Self {
             cache,
             refresh_fn,
             refresh_arg,
-            backoff: Duration::from_millis(10),
+            backoff,
+        }
+    }
+    #[allow(unused_assignments)]
+    async fn run(mut self) -> ! {
+        let mut expire_time = Instant::now();
+        let mut refresh_time = Instant::now();
+        select! {
+            _ = self.cache.notifiers.expired.notified() => {
+                debug!("Starting refresh");
+                let times = self.refresh().await;
+                debug!("Refresh finished");
+                expire_time = times.0;
+                refresh_time = times.1;
+            }
+        }
+        loop {
+            select! {
+                _ = self.cache.notifiers.expired.notified() => {
+                    debug!("Starting refresh");
+                    let times = self.refresh().await;
+                    debug!("Refresh finished");
+                    expire_time = times.0;
+                    refresh_time = times.1;
+                }
+                _ = time::sleep_until(time::Instant::from_std(refresh_time)) => {
+                    debug!("Starting refresh");
+                    let times = self.refresh().await;
+                    debug!("Refresh finished");
+                    expire_time = times.0;
+                    refresh_time = times.1;
+                }
+                _ = time::sleep_until(time::Instant::from_std(expire_time)) => {
+                    debug!("Starting refresh");
+                    let times = self.refresh().await;
+                    debug!("Refresh finished");
+                    expire_time = times.0;
+                    refresh_time = times.1;
+                }
+            }
         }
     }
     async fn refresh(&mut self) -> (Instant, Instant) {
@@ -203,7 +214,7 @@ impl<
         }) = (self.refresh_fn)(self.refresh_arg.clone()).await
         {
             debug!("Acquiring writer lock");
-            self.backoff = Duration::from_millis(10);
+            self.backoff.reset();
             let mut cd_writer = self.cache.cache_data.write().await;
             cd_writer.value = new_value;
             cd_writer.expire_time = new_expire_time;
@@ -213,9 +224,10 @@ impl<
             return (new_expire_time, new_refresh_time);
         }
         warn!("Refresh fn failed");
-        let ret = (Instant::now() + self.backoff, Instant::now() + self.backoff);
-        self.backoff *= 2;
-        ret
+        (
+            Instant::now() + self.backoff.next_backoff().unwrap(),
+            Instant::now() + self.backoff.next_backoff().unwrap(),
+        )
     }
 }
 
