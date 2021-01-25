@@ -57,6 +57,7 @@ struct CacheRefresher<T, A, F> {
     refresh_fn: fn(A) -> F,
     refresh_arg: A,
     backoff: backoff::ExponentialBackoff,
+    next_wake: Instant,
 }
 
 impl<T> Clone for DogpileCache<T> {
@@ -164,48 +165,34 @@ impl<
             refresh_fn,
             refresh_arg,
             backoff,
+            next_wake: Instant::now(),
         }
     }
     #[allow(unused_assignments)]
     async fn run(mut self) -> ! {
-        let mut expire_time = Instant::now();
-        let mut refresh_time = Instant::now();
         select! {
             _ = self.cache.notifiers.expired.notified() => {
                 debug!("Starting refresh");
-                let times = self.refresh().await;
+                self.refresh().await;
                 debug!("Refresh finished");
-                expire_time = times.0;
-                refresh_time = times.1;
             }
         }
         loop {
             select! {
                 _ = self.cache.notifiers.expired.notified() => {
                     debug!("Starting refresh");
-                    let times = self.refresh().await;
+                    self.refresh().await;
                     debug!("Refresh finished");
-                    expire_time = times.0;
-                    refresh_time = times.1;
                 }
-                _ = time::sleep_until(time::Instant::from_std(refresh_time)) => {
+                _ = time::sleep_until(time::Instant::from_std(self.next_wake)) => {
                     debug!("Starting refresh");
-                    let times = self.refresh().await;
+                    self.refresh().await;
                     debug!("Refresh finished");
-                    expire_time = times.0;
-                    refresh_time = times.1;
-                }
-                _ = time::sleep_until(time::Instant::from_std(expire_time)) => {
-                    debug!("Starting refresh");
-                    let times = self.refresh().await;
-                    debug!("Refresh finished");
-                    expire_time = times.0;
-                    refresh_time = times.1;
                 }
             }
         }
     }
-    async fn refresh(&mut self) -> (Instant, Instant) {
+    async fn refresh(&mut self) {
         // We need to hold the refresh lock so only one task will attempt to generate the new value
         if let Ok(CacheData {
             value: new_value,
@@ -219,15 +206,13 @@ impl<
             cd_writer.value = new_value;
             cd_writer.expire_time = new_expire_time;
             cd_writer.refresh_time = new_refresh_time;
+            self.next_wake = std::cmp::min(new_expire_time, new_refresh_time);
             debug!("notifying waiters");
             self.cache.notifiers.refreshed.notify_waiters();
-            return (new_expire_time, new_refresh_time);
+        } else {
+            warn!("Refresh fn failed");
+            self.next_wake = Instant::now() + self.backoff.next_backoff().unwrap();
         }
-        warn!("Refresh fn failed");
-        (
-            Instant::now() + self.backoff.next_backoff().unwrap(),
-            Instant::now() + self.backoff.next_backoff().unwrap(),
-        )
     }
 }
 
