@@ -115,10 +115,14 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
     pub async fn read(&self) -> RwLockReadGuard<'_, CacheData<T>> {
         // Register a notification, this has to be done before grabbing the read lock
         let n = self.notifiers.refreshed.notified();
-        if self.cache_data.read().await.expire_time <= Instant::now() {
-            self.refresh();
-            n.await;
+        {
+            let read_lock = self.cache_data.read().await;
+            if read_lock.expire_time > Instant::now() {
+                return read_lock;
+            }
         }
+        self.refresh();
+        n.await;
         self.cache_data.read().await
     }
 
