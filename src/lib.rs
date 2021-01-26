@@ -23,11 +23,12 @@
 //! ```
 
 use backoff::backoff::Backoff;
+use parking_lot::{RwLock, RwLockReadGuard};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::select;
-use tokio::sync::{Notify, RwLock, RwLockReadGuard};
+use tokio::sync::Notify;
 use tokio::time;
 
 /// A simple cache that holds some data that expires and has a task to attempt to refresh
@@ -116,14 +117,14 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
         // Register a notification, this has to be done before grabbing the read lock
         let n = self.notifiers.refreshed.notified();
         {
-            let read_lock = self.cache_data.read().await;
+            let read_lock = self.cache_data.read();
             if read_lock.expire_time > Instant::now() {
                 return read_lock;
             }
         }
         self.refresh();
         n.await;
-        self.cache_data.read().await
+        self.cache_data.read()
     }
 
     /// Trigger a cach refresh and wait to be notified of the updated cache value
@@ -196,7 +197,7 @@ impl<
         }) = (self.refresh_fn)(self.refresh_arg.clone()).await
         {
             self.backoff.reset();
-            let mut cd_writer = self.cache.cache_data.write().await;
+            let mut cd_writer = self.cache.cache_data.write();
             cd_writer.value = new_value;
             cd_writer.expire_time = new_expire_time;
             cd_writer.refresh_time = new_refresh_time;
@@ -230,7 +231,7 @@ mod test {
         let c2 = c1.clone();
         sleep(Duration::from_millis(6)).await;
         assert_eq!(c1.read().await.value, 1);
-        c1.cache_data.write().await.value = 10;
+        c1.cache_data.write().value = 10;
         assert_eq!(c1.read().await.value, 10);
         sleep(Duration::from_millis(5)).await;
         assert_eq!(c1.read().await.value, 10);

@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+parking_lot = "0.11"
 backoff = "0.2"
 
 [dev-dependencies]
