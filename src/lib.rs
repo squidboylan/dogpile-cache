@@ -5,7 +5,7 @@
 //! Example
 //! ```rust
 //! use std::time::{Duration, Instant};
-//! use dogpile_cache_rs::{DogpileCache, CacheData};
+//! use dogpile_cache_rs::{DogpileCache, CacheData, ExponentialBackoff};
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -17,16 +17,25 @@
 //!             Instant::now() + valid_length/2,
 //!         ))
 //!     }
-//!     let c = DogpileCache::<i32>::create(num, 1).await;
+//!     let backoff = ExponentialBackoff {
+//!         current_interval: Duration::from_millis(50),
+//!         initial_interval: Duration::from_millis(50),
+//!         randomization_factor: 0.0,
+//!         ..backoff::ExponentialBackoff::default()
+//!     };
+//!     let c = DogpileCache::<i32>::create(num, 1, backoff).await;
 //!     assert_eq!(c.read().await.value, 1);
 //! }
 //! ```
 
 use backoff::backoff::Backoff;
+pub use backoff::backoff::Constant as ConstantBackoff;
+pub use backoff::exponential::ExponentialBackoff;
+pub use backoff::ExponentialBackoff as ExponentialBackoffSystemClock;
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::time;
@@ -52,11 +61,11 @@ pub struct CacheData<T> {
     pub refresh_time: Instant,
 }
 
-struct CacheRefresher<T, A, F> {
+struct CacheRefresher<T, A, F, B> {
     cache: DogpileCache<T>,
     refresh_fn: fn(A) -> F,
     refresh_arg: A,
-    backoff: backoff::ExponentialBackoff,
+    backoff: B,
     next_wake: Instant,
 }
 
@@ -77,12 +86,19 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
     /// should wrap it in an `Option`. `refresh_arg` will be cloned and passed to
     /// `refresh_fn`, if your refresh_arg is expensive to clone you should use an `Arc<V>` and if you
     /// need mutability you should use `Arc<RwLock<V>>` or `Arc<Mutex<V>>`.
+    ///
+    /// Note: The ExponentialBackoff can return `None` when calling `next_backoff()` because it has a
+    /// `max_elapsed_time` field. For the DogpileCache this does not make sense as the refresh task
+    /// is expected to always retry. For this reason if `next_backoff()` returns `None` the
+    /// previous value will be used.
     pub async fn create<
         A: Clone + Send + Sync + 'static,
         F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
+        B: Backoff + Send + 'static,
     >(
         refresh_fn: fn(A) -> F,
         refresh_arg: A,
+        backoff: B,
     ) -> Self {
         let expire_time = Instant::now();
         let refresh_time = Instant::now();
@@ -102,7 +118,7 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
         };
         let c = cache.clone();
         tokio::spawn(async move {
-            let refresher = CacheRefresher::create(c, refresh_fn, refresh_arg);
+            let refresher = CacheRefresher::create(c, refresh_fn, refresh_arg, backoff);
             refresher.run().await;
         });
         cache
@@ -152,16 +168,10 @@ impl<
         T,
         A: Clone + Send + Sync + 'static,
         F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
-    > CacheRefresher<T, A, F>
+        B: Backoff + Send + 'static,
+    > CacheRefresher<T, A, F, B>
 {
-    fn create(cache: DogpileCache<T>, refresh_fn: fn(A) -> F, refresh_arg: A) -> Self {
-        let backoff = backoff::ExponentialBackoff {
-            max_elapsed_time: None,
-            current_interval: Duration::from_millis(50),
-            initial_interval: Duration::from_millis(50),
-            randomization_factor: 0.0,
-            ..backoff::ExponentialBackoff::default()
-        };
+    fn create(cache: DogpileCache<T>, refresh_fn: fn(A) -> F, refresh_arg: A, backoff: B) -> Self {
         Self {
             cache,
             refresh_fn,
@@ -203,8 +213,8 @@ impl<
             cd_writer.refresh_time = new_refresh_time;
             self.next_wake = std::cmp::min(new_expire_time, new_refresh_time);
             self.cache.notifiers.refreshed.notify_waiters();
-        } else {
-            self.next_wake = Instant::now() + self.backoff.next_backoff().unwrap();
+        } else if let Some(dur) = self.backoff.next_backoff() {
+            self.next_wake = Instant::now() + dur;
         }
     }
 }
@@ -213,10 +223,19 @@ impl<
 mod test {
     use super::*;
     use std::sync::Mutex;
+    use std::time::Duration;
     use tokio::time::sleep;
     #[tokio::test]
     async fn test_cache_basics() {
         let sleep_length = Duration::from_millis(10);
+        let backoff = ExponentialBackoff {
+            max_elapsed_time: None,
+            current_interval: Duration::from_millis(50),
+            initial_interval: Duration::from_millis(50),
+            randomization_factor: 0.0,
+            ..backoff::ExponentialBackoff::default()
+        };
+
         async fn num(v: Arc<Mutex<i32>>) -> Result<CacheData<i32>, ()> {
             let valid_length = Duration::from_millis(20);
             let mut l = v.lock().unwrap();
@@ -227,7 +246,7 @@ mod test {
                 Instant::now() + valid_length / 2,
             ))
         }
-        let c1 = DogpileCache::<i32>::create(num, Arc::new(Mutex::new(0))).await;
+        let c1 = DogpileCache::<i32>::create(num, Arc::new(Mutex::new(0)), backoff).await;
         let c2 = c1.clone();
         sleep(Duration::from_millis(6)).await;
         assert_eq!(c1.read().await.value, 1);
