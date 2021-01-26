@@ -93,7 +93,8 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
     /// previous value will be used.
     pub async fn create<
         A: Clone + Send + Sync + 'static,
-        F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
+        E,
+        F: Future<Output = Result<CacheData<T>, E>> + Send + 'static,
         B: Backoff + Send + 'static,
     >(
         refresh_fn: fn(A) -> F,
@@ -166,7 +167,8 @@ impl<T> CacheData<T> {
 impl<
         T,
         A: Clone + Send + Sync + 'static,
-        F: Future<Output = Result<CacheData<T>, ()>> + Send + 'static,
+        E,
+        F: Future<Output = Result<CacheData<T>, E>> + Send + 'static,
         B: Backoff + Send + 'static,
     > CacheRefresher<T, A, F, B>
 {
