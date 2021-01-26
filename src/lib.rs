@@ -150,7 +150,6 @@ impl<T: Default + Send + Sync + 'static> DogpileCache<T> {
         self.notifiers
             .once
             .call_once(|| self.notifiers.expired.notify_one());
-        self.notifiers.expired.notify_waiters();
     }
 }
 
@@ -189,9 +188,6 @@ impl<
         }
         loop {
             select! {
-                _ = self.cache.notifiers.expired.notified() => {
-                    self.refresh().await;
-                }
                 _ = time::sleep_until(time::Instant::from_std(self.next_wake)) => {
                     self.refresh().await;
                 }
