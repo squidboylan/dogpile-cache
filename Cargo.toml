@@ -1,5 +1,5 @@
 [package]
-name = "dogpile-cache-rs"
+name = "dogpile-cache"
 version = "0.1.0"
 authors = ["Caleb Boylan <calebboylan@gmail.com>"]
 edition = "2018"

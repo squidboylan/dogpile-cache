@@ -5,7 +5,7 @@
 //! Simple tested example
 //! ```rust
 //! use std::time::{Duration, Instant};
-//! use dogpile_cache_rs::{DogpileCache, CacheData, ExponentialBackoff};
+//! use dogpile_cache::{DogpileCache, CacheData, ExponentialBackoff};
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -31,7 +31,7 @@
 //! More realistic usecase for caching a token:
 //! ```ignore
 //! use std::time::{Duration, Instant};
-//! use dogpile_cache_rs::{DogpileCache, CacheData, ExponentialBackoff};
+//! use dogpile_cache::{DogpileCache, CacheData, ExponentialBackoff};
 //! use reqwest::Client;
 //!
 //! #[tokio::main]
