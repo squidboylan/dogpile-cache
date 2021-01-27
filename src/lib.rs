@@ -2,7 +2,7 @@
 //! and will make an effort to premtively refresh the value before it is
 //! expired and do so in a way that requires little waiting.
 //!
-//! Example
+//! Simple tested example
 //! ```rust
 //! use std::time::{Duration, Instant};
 //! use dogpile_cache_rs::{DogpileCache, CacheData, ExponentialBackoff};
@@ -27,8 +27,36 @@
 //!     assert_eq!(c.read().await.value, 1);
 //! }
 //! ```
+//!
+//! More realistic usecase for caching a token:
+//! ```ignore
+//! use std::time::{Duration, Instant};
+//! use dogpile_cache_rs::{DogpileCache, CacheData, ExponentialBackoff};
+//! use reqwest::Client;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     async fn gen_token(c: Client) -> reqwest::Result<CacheData<Token>> {
+//!         let token = generate_token_using_client(c)?;
+//!         Ok(CacheData::new(
+//!             token,
+//!             Instant::now() + token.valid_length,
+//!             Instant::now() + token.valid_length/2,
+//!         ))
+//!     }
+//!     let backoff = ExponentialBackoff {
+//!         current_interval: Duration::from_millis(50),
+//!         initial_interval: Duration::from_millis(50),
+//!         randomization_factor: 0.0,
+//!         ..backoff::ExponentialBackoff::default()
+//!     };
+//!     let client = Client::new()
+//!     let c = DogpileCache::<i32>::create(num, client, backoff).await;
+//!     let token_lock = c.read().await;
+//! }
+//! ```
 
-use backoff::backoff::Backoff;
+pub use backoff::backoff::Backoff;
 pub use backoff::backoff::Constant as ConstantBackoff;
 pub use backoff::exponential::ExponentialBackoff;
 pub use backoff::ExponentialBackoff as ExponentialBackoffSystemClock;
